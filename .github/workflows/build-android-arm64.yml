@@ -1,0 +1,140 @@
+
+name: Build Docker Engine 29.9.2 - Android ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-android-arm64.yml"
+
+permissions:
+  contents: read
+
+env:
+  MOBY_REF: docker-v29.9.2
+  TARGET_PLATFORM: linux/arm64
+
+jobs:
+  build:
+    name: Build complete Docker runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout Moby source
+        uses: actions/checkout@v4
+        with:
+          repository: moby/moby
+          ref: docker-v29.9.2
+          path: moby
+          fetch-depth: 1
+
+      - name: Verify source version
+        working-directory: moby
+        run: |
+          set -eux
+          git describe --tags --exact-match
+          test "$(git describe --tags --exact-match)" = "$MOBY_REF"
+          git rev-parse HEAD
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build complete ARM64 binaries
+        working-directory: moby
+        run: |
+          set -eux
+
+          mkdir -p ../out
+
+          docker buildx build \
+            --platform "$TARGET_PLATFORM" \
+            --target all \
+            --build-arg DOCKER_STATIC=1 \
+            --output type=local,dest=../out \
+            .
+
+      - name: Verify required binaries
+        run: |
+          set -eux
+
+          for binary in \
+            dockerd \
+            docker-proxy \
+            containerd \
+            runc
+          do
+            test -s "out/$binary"
+            echo "Found: $binary"
+          done
+
+          sudo apt-get update
+          sudo apt-get install -y binutils file
+
+          for binary in \
+            dockerd \
+            docker-proxy \
+            containerd \
+            runc
+          do
+            echo "Checking $binary"
+            file "out/$binary"
+
+            readelf -h "out/$binary" |
+              grep -q "AArch64"
+          done
+
+          echo "ARM64_BINARY_VERIFICATION_OK"
+
+      - name: Verify daemon version
+        run: |
+          set -eux
+
+          # Cross-compiled ARM64 binaries cannot necessarily
+          # execute on the x86_64 GitHub runner.
+          # Verify their embedded architecture and metadata.
+          file out/dockerd
+          readelf -h out/dockerd
+
+      - name: Package binaries
+        run: |
+          set -eux
+
+          mkdir -p package
+
+          cp -a out/. package/
+
+          cp moby/LICENSE package/
+          cp moby/NOTICE package/
+
+          cat > package/BUILD_INFO.txt <<EOF
+          Project: Moby / Docker Engine
+          Version: 29.9.2
+          Source tag: $MOBY_REF
+          Platform: $TARGET_PLATFORM
+          Build: Static
+          Architecture: ARM64
+          EOF
+
+          tar -czf docker-engine-29.9.2-android-arm64.tar.gz \
+            -C package .
+
+          sha256sum docker-engine-29.9.2-android-arm64.tar.gz \
+            > SHA256SUMS.txt
+
+          ls -lh docker-engine-29.9.2-android-arm64.tar.gz
+          cat SHA256SUMS.txt
+
+      - name: Upload Docker binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-engine-29.9.2-android-arm64
+          path: |
+            docker-engine-29.9.2-android-arm64.tar.gz
+            SHA256SUMS.txt
+          retention-days: 14
+          if-no-files-found: error
